@@ -55,7 +55,7 @@ app.get("/", (req, res) => {
 app.listen(port, () => console.log(`Server on ${port}`));
 
 // ===== BOT CONFIG =====
-let token = process.env.TELEGRAM_BOT_TOKEN || "7919596620:AAGWhiUA1C3CHAFYWSHYnvoqxowgudR35B8";
+let token = process.env.TELEGRAM_BOT_TOKEN || "8571655439:AAF5jpoe3cGRBJtekNIbp6uCKE6kpOcoBKQ";
 const bot = new TelegramBot(token, { polling: true });
 let Start = new Date();
 
