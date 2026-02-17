@@ -4,11 +4,12 @@ const TelegramBot = require("node-telegram-bot-api");
 const chalk = require("chalk");
 const express = require("express");
 const { 
-  igdl,      // Instagram
-  twitter,   // Twitter
-  pinterest, // Pinterest
-  youtube    // YouTube
+  igdl,      // Instagram (btch-downloader)
+  twitter,   // Twitter (btch-downloader)
+  pinterest, // Pinterest (btch-downloader)
+  youtube    // YouTube (btch-downloader)
 } = require("btch-downloader");
+const ytdl = require("@distube/ytdl-core");
 
 const app = express();
 const port = process.env.PORT || 8080;
@@ -121,25 +122,77 @@ async function downloadFromTikWM(url) {
   };
 }
 
-// ===== INSTAGRAM DOWNLOADER (btch-downloader) =====
+// ===== INSTAGRAM DOWNLOADER (btch-downloader + fallback) =====
 async function downloadFromInstagram(url) {
   try {
+    // Try btch-downloader first
     const result = await igdl(url);
     
-    if (!result || !result.status || !result.data || result.data.length === 0) {
-      throw new Error("No media found");
+    if (result && result.status && result.result && Array.isArray(result.result)) {
+      // Filter out empty objects
+      const validResults = result.result.filter(item => item && Object.keys(item).length > 0);
+      
+      if (validResults.length > 0) {
+        const items = validResults.map(media => ({
+          type: media.url && media.url.includes('.mp4') ? "video" : "image",
+          url: media.url || media.thumbnail,
+        }));
+        
+        return {
+          type: items[0].type,
+          items,
+          title: "Instagram Content",
+        };
+      }
     }
-
-    const items = result.data.map(media => ({
-      type: media.type || "image",
-      url: media.url,
-    }));
-
-    return {
-      type: items[0].type,
-      items,
-      title: result.title || "Instagram Content",
-    };
+    
+    // Fallback: Try alternative API
+    console.log("btch-downloader returned empty, trying fallback API...");
+    
+    const apiUrl = `https://v3.saveig.app/api/ajaxSearch`;
+    const response = await axios.post(apiUrl, 
+      new URLSearchParams({
+        q: url,
+        t: 'media',
+        lang: 'en'
+      }), 
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'Mozilla/5.0'
+        },
+        timeout: 10000
+      }
+    );
+    
+    if (response.data && response.data.status === 'ok' && response.data.data) {
+      const html = response.data.data;
+      const downloadRegex = /<a[^>]+href="([^"]+)"[^>]*download[^>]*>/gi;
+      const urls = [];
+      let match;
+      
+      while ((match = downloadRegex.exec(html)) !== null) {
+        const downloadUrl = match[1];
+        if (downloadUrl && !downloadUrl.includes('saveig.app')) {
+          urls.push(downloadUrl);
+        }
+      }
+      
+      if (urls.length > 0) {
+        const items = urls.map(mediaUrl => ({
+          type: mediaUrl.includes('.mp4') ? "video" : "image",
+          url: mediaUrl,
+        }));
+        
+        return {
+          type: items[0].type,
+          items,
+          title: "Instagram Content",
+        };
+      }
+    }
+    
+    throw new Error("No media found");
   } catch (error) {
     throw new Error("Failed to download Instagram content: " + error.message);
   }
@@ -150,26 +203,33 @@ async function downloadFromTwitter(url) {
   try {
     const result = await twitter(url);
     
-    if (!result || !result.status || !result.url || result.url.length === 0) {
+    if (!result || result.status === false) {
       throw new Error("No media found");
     }
 
-    // Filter video URLs
-    const videos = result.url.filter(item => item.url && item.url.includes('.mp4'));
-    
-    if (videos.length > 0) {
-      // Pilih kualitas terbaik (HD)
-      const hdVideo = videos.find(v => v.quality === 'HD' || v.hd) || videos[0];
+    // Check for video URLs
+    if (result.url && Array.isArray(result.url)) {
+      // Filter out empty objects
+      const validUrls = result.url.filter(item => item && Object.keys(item).length > 0);
       
-      return {
-        type: "video",
-        video: hdVideo.url,
-        images: null,
-        title: result.title || "Twitter Content",
-      };
+      if (validUrls.length > 0) {
+        // Get HD or SD video
+        const hdVideo = validUrls.find(v => v.hd);
+        const sdVideo = validUrls.find(v => v.sd);
+        const videoUrl = (hdVideo && hdVideo.hd) || (sdVideo && sdVideo.sd);
+        
+        if (videoUrl) {
+          return {
+            type: "video",
+            video: videoUrl,
+            images: null,
+            title: result.title || "Twitter Content",
+          };
+        }
+      }
     }
 
-    throw new Error("No video found");
+    throw new Error("No video found in response");
   } catch (error) {
     throw new Error("Failed to download Twitter content: " + error.message);
   }
@@ -180,49 +240,102 @@ async function downloadFromPinterest(url) {
   try {
     const result = await pinterest(url);
     
-    if (!result || !result.status || !result.result) {
+    if (!result || result.status === false) {
       throw new Error("No media found");
     }
 
-    const data = result.result;
+    const data = result.result || result;
     
-    if (data.video) {
-      return {
-        type: "video",
-        video: data.video,
-        image: null,
-        title: data.title || "Pinterest Content",
-      };
-    } else if (data.image) {
-      return {
-        type: "photo",
-        video: null,
-        image: data.image,
-        title: data.title || "Pinterest Content",
-      };
+    // Check nested result
+    if (data.result) {
+      const pinData = data.result;
+      
+      // Video
+      if (pinData.video_url) {
+        return {
+          type: "video",
+          video: pinData.video_url,
+          image: null,
+          title: pinData.title || pinData.description || "Pinterest Content",
+        };
+      }
+      
+      // Image
+      if (pinData.image) {
+        return {
+          type: "photo",
+          video: null,
+          image: pinData.image,
+          title: pinData.title || pinData.description || "Pinterest Content",
+        };
+      }
+      
+      // Images object (get highest quality)
+      if (pinData.images && pinData.images.orig) {
+        return {
+          type: "photo",
+          video: null,
+          image: pinData.images.orig.url,
+          title: pinData.title || pinData.description || "Pinterest Content",
+        };
+      }
     }
 
-    throw new Error("No media found");
+    throw new Error("No media found in response");
   } catch (error) {
     throw new Error("Failed to download Pinterest content: " + error.message);
   }
 }
 
-// ===== YOUTUBE DOWNLOADER (btch-downloader) =====
+// ===== YOUTUBE DOWNLOADER (btch-downloader + @distube/ytdl-core fallback) =====
 async function downloadFromYouTube(url) {
   try {
-    const result = await youtube(url);
-    
-    if (!result || !result.status || !result.mp4) {
-      throw new Error("No video found");
+    // Try btch-downloader first (faster for shorts)
+    try {
+      const result = await Promise.race([
+        youtube(url),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
+      ]);
+      
+      if (result && result.status && result.mp4) {
+        return {
+          type: "video",
+          video: result.mp4,
+          title: result.title || "YouTube Video",
+          thumbnail: result.thumbnail,
+          quality: "HD",
+        };
+      }
+    } catch (e) {
+      console.log("btch-downloader failed/timeout, using ytdl-core...");
     }
+    
+    // Fallback to ytdl-core
+    if (!ytdl.validateURL(url)) {
+      throw new Error("Invalid YouTube URL");
+    }
+
+    const info = await ytdl.getInfo(url);
+    const formats = ytdl.filterFormats(info.formats, 'videoandaudio');
+    
+    if (formats.length === 0) {
+      throw new Error("No suitable format found");
+    }
+
+    // Get best quality format
+    const format = formats.reduce((best, current) => {
+      const bestHeight = best.height || 0;
+      const currentHeight = current.height || 0;
+      return currentHeight > bestHeight ? current : best;
+    });
 
     return {
       type: "video",
-      video: result.mp4,
-      title: result.title || "YouTube Video",
-      thumbnail: result.thumbnail,
-      quality: "HD",
+      video: format.url,
+      title: info.videoDetails.title || "YouTube Video",
+      thumbnail: info.videoDetails.thumbnails[info.videoDetails.thumbnails.length - 1].url,
+      quality: format.qualityLabel || "HD",
+      duration: info.videoDetails.lengthSeconds,
     };
   } catch (error) {
     throw new Error("Failed to download YouTube content: " + error.message);
@@ -513,8 +626,19 @@ bot.on("message", async (msg) => {
         lang === "ID" ? "🎥 Mengunduh video YouTube..." : "🎥 Downloading YouTube video...",
       );
 
-      await bot.sendChatAction(From, "upload_video");
-      await bot.sendVideo(From, data.video, { caption: data.title });
+      // Check video duration (Telegram limit: 50MB for videos)
+      if (data.duration && parseInt(data.duration) > 600) {
+        // Video lebih dari 10 menit, kirim link saja
+        await bot.sendMessage(
+          From,
+          lang === "ID" 
+            ? `⚠️ Video terlalu panjang (${Math.floor(data.duration / 60)} menit).\n\n📹 ${data.title}\n\n🔗 Link download: ${data.video}`
+            : `⚠️ Video too long (${Math.floor(data.duration / 60)} minutes).\n\n📹 ${data.title}\n\n🔗 Download link: ${data.video}`,
+        );
+      } else {
+        await bot.sendChatAction(From, "upload_video");
+        await bot.sendVideo(From, data.video, { caption: data.title });
+      }
     }
 
     bot.sendMessage(
